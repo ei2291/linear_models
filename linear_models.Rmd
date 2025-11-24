@@ -1,0 +1,361 @@
+---
+title: "linear_models"
+output: github_document
+    
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(p8105.datasets)
+library(rvest)
+library(lme4)
+library(broom.mixed)
+
+knitr::opts_chunk$set(
+  fig.width = 6,
+  fig.asp = .6,
+  out.width = "90%"
+)
+
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+```
+
+## 1. Load packages^ and set seed
+
+```{r}
+set.seed(1)
+```
+
+library(tidyverse): loads tools for data cleaning + plotting
+library(p8105.datasets): loads the example datasets used in class
+set.seed(1): makes random results repeat the same every time.
+
+## 2. Load + Clean Airbnb data
+
+```{r}
+data("nyc_airbnb")
+
+nyc_airbnb = 
+  nyc_airbnb |> 
+  mutate(stars = review_scores_location / 2) |> 
+  rename(
+    borough = neighbourhood_group,
+    neighborhood = neighbourhood) |> 
+  filter(borough != "Staten Island") |> 
+  select(price, stars, borough, neighborhood, room_type)
+
+```
+
+what this does:
+- loads the datset `nyc_airbnb`.
+- `mutate`: creates new variable `stars`.
+- `rename`: changes column names to simpler ones.
+- `filter`: removes Staten Island listings.
+- `select`: keeps only the needed columns.
+
+## 3. Fit first linear model
+```{r}
+fit = lm(price ~ stars + borough, data = nyc_airbnb)
+```
+
+`lm()`: fits a linear regression.
+`price`: outcome we want to predict.
+`stars + borough`: predictors
+R automatically handles categorical `borough` using dummy variables.
+
+## 4. Change factor reference levels
+
+```{r}
+nyc_airbnb = 
+  nyc_airbnb |> 
+  mutate(
+    borough = fct_infreq(borough),
+    room_type = fct_infreq(room_type))
+
+```
+
+this does:
+turns `borough`+`room_type` into ordered factors.
+most common category becomes the reference.
+only changes interpretation, not the model fit. 
+
+then model is refit:
+```{r}
+fit = lm(price ~ stars + borough, data = nyc_airbnb)
+
+```
+
+## 5. Base R model output functions
+
+```{r}
+summary(fit)
+summary(fit)$coef
+coef(fit)
+fitted.values(fit)
+
+```
+
+what these do:
+`summary(fit)`: full model summary.
+`summary(fit)$coef`: only coefficient table
+coef(fit): estimates only.
+`fitted.calues(fit)`: predicted prices.
+these are not tidy, so broom is easier.
+
+## 6.Tidy model results with `broom`.
+```{r}
+fit |> 
+  broom::glance()
+
+```
+
+gives: model level info (r2, AIC, n, etc.)
+
+```{r}
+fit |> 
+  broom::tidy()
+```
+
+gives: one row per coefficient (estimate, p-value, etc.)
+
+```{r}
+fit |> 
+  broom::tidy() |> 
+  select(term, estimate, p.value) |> 
+  mutate(term = str_replace(term, "^borough", "Borough: ")) |> 
+  knitr::kable(digits = 3)
+```
+
+what this does:
+selects only important columns.
+renames terms to look nicer.
+prints as a formatted table.
+
+## 7. Add resuduals & predictions
+
+```{r}
+modelr::add_residuals(nyc_airbnb, fit)
+```
+
+adds a new column `resid` = actual - predicted.
+
+```{r}
+modelr::add_predictions(nyc_airbnb, fit)
+```
+
+adds a new column `pred` = predicted price.
+
+```{r}
+nyc_airbnb |> 
+  modelr::add_residuals(fit) |> 
+  ggplot(aes(x = borough, y = resid)) + geom_violin()
+
+```
+
+visualizes residuals by borough.
+
+```{r}
+nyc_airbnb |> 
+  modelr::add_residuals(fit) |> 
+  ggplot(aes(x = stars, y = resid)) + geom_point()
+
+```
+
+shows residuals vs stars.
+
+## 8. Nested model comparison (hypothesis testing)
+
+```{r}
+fit_null = lm(price ~ stars + borough, data = nyc_airbnb)
+fit_alt = lm(price ~ stars + borough + room_type, data = nyc_airbnb)
+```
+
+`fit_null` = small model
+`fit_alt` = adds `room_type`
+
+```{r}
+anova(fit_null, fit_alt) |> 
+  broom::tidy()
+```
+
+tests if adding `room_type` improves the model.
+works only for nested models.
+
+## 9. Interaction model
+
+```{r}
+nyc_airbnb |> 
+  lm(price ~ stars * borough + room_type * borough, data = _) |> 
+  broom::tidy() |> 
+  knitr::kable(digits = 3)
+```
+
+what this means
+* adds main effects + interactions
+allows effects to differ by borough
+output is harder to interpret.
+
+## 10. Fit separate models by borough
+
+```{r}
+nest_lm_res =
+  nyc_airbnb |> 
+  nest(data = -borough) |> 
+  mutate(
+    models = map(data, \(df) lm(price ~ stars + room_type, data = df)),
+    results = map(models, broom::tidy)) |> 
+  select(-data, -models) |> 
+  unnest(results)
+```
+
+what this does:
+splits data into one datasets per borough.
+fits a model inside each borough
+tidies results
+easier to read than interactions
+
+## 11. Visualize separate results
+
+```{r}
+nest_lm_res |> 
+  select(borough, term, estimate) |> 
+  mutate(term = fct_inorder(term)) |> 
+  pivot_wider(
+    names_from = term, values_from = estimate) |> 
+  knitr::kable(digits = 3)
+
+```
+
+wide table = one row per borough, one column per coefficient
+
+## 12. Nest by neighborhood (manhattan only)
+
+```{r}
+manhattan_airbnb =
+  nyc_airbnb |> 
+  filter(borough == "Manhattan")
+
+```
+
+keeps only Manhattan listings
+
+```{r}
+manhattan_nest_lm_res =
+  manhattan_airbnb |> 
+  nest(data = -neighborhood) |> 
+  mutate(
+    models = map(data, \(df) lm(price ~ stars + room_type, data = df)),
+    results = map(models, broom::tidy)) |> 
+  select(-data, -models) |> 
+  unnest(results)
+
+```
+
+fits one model per neighborhood.
+
+```{r}
+manhattan_nest_lm_res |> 
+  filter(str_detect(term, "room_type")) |> 
+  ggplot(aes(x = neighborhood, y = estimate)) + 
+  geom_point() + 
+  facet_wrap(~term) + 
+  theme(axis.text.x = element_text(angle = 80, hjust = 1))
+
+```
+
+plots how room type effect changes across neighborhoods.
+
+## 13. Mixed model
+
+```{r}
+manhattan_airbnb |> 
+  lme4::lmer(price ~ stars + room_type + (1 + room_type | neighborhood), data = _) |> 
+  broom.mixed::tidy()
+
+```
+
+Meaning:
+fits a mixed-effects model
+neighborhoods get their own random intercepts + room-type slopes.
+better than fitting 50+ separate models.
+
+## 14. clean baltimore data
+
+```{r}
+baltimore_df = 
+  read_csv("homicide-data.csv") |> 
+  filter(city == "Baltimore") |> 
+  mutate(
+    resolved = as.numeric(disposition == "Closed by arrest"),
+    victim_age = as.numeric(victim_age),
+    victim_race = fct_relevel(victim_race, "White")) |> 
+  select(resolved, victim_age, victim_race, victim_sex)
+
+```
+
+what this does:
+- reads data
+- keeps only Baltimore
+- makes `resolved` a 0/1 outcome
+- ensures age in numeric
+- sets White as reference race
+- keeps only needed variable
+
+## 15. fit logistic regression
+
+```{r}
+fit_logistic = 
+  baltimore_df |> 
+  glm(resolved ~ victim_age + victim_race + victim_sex, data = _, family = binomial()) 
+```
+
+meaning:
+`glm(..., family = binomial())` = logistic regression
+predicts probability that a case is resolved.
+
+## 16. Tidy + get odds ratios
+
+```{r}
+fit_logistic |> 
+  broom::tidy() |> 
+  mutate(OR = exp(estimate)) |>
+  select(term, log_OR = estimate, OR, p.value) |> 
+  knitr::kable(digits = 3)
+```
+
+what this does:
+`broom::tidy()` = coefficient table
+`exp(estimate)` = converts log-odds to odds ratios
+prints clean results
+
+## 17. Add predicted probabilities
+
+```{r}
+baltimore_df |> 
+  modelr::add_predictions(fit_logistic) |> 
+  mutate(fitted_prob = boot::inv.logit(pred))
+```
+
+what this does:
+`pred` = predicted log-odds
+`inv.logit(pred)` = probability between 0-1
+gives predicted probability case is solved
+
+
+
+
+
+
+
+
+
+
